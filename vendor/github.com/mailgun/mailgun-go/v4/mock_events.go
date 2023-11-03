@@ -5,12 +5,12 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 	"github.com/mailgun/mailgun-go/v4/events"
 )
 
-func (ms *mockServer) addEventRoutes(r *mux.Router) {
-	r.HandleFunc("/{domain}/events", ms.listEvents).Methods(http.MethodGet)
+func (ms *mockServer) addEventRoutes(r chi.Router) {
+	r.Get("/{domain}/events", ms.listEvents)
 
 	var (
 		tags            = []string{"tag1", "tag2"}
@@ -27,6 +27,7 @@ func (ms *mockServer) addEventRoutes(r *mux.Router) {
 			DeviceType:     "desktop",
 			IP:             "8.8.8.8",
 			UserAgent:      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.12; rv:54.0) Gecko/20100101 Firefox/54.0",
+			Bot:            "",
 		}
 		geoLocation = events.GeoLocation{
 			City:    "San Antonio",

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/pkg/errors"
 	"io"
 	"io/ioutil"
 	"mime/multipart"
@@ -15,17 +14,20 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/pkg/errors"
 )
 
-var validURL = regexp.MustCompile(`^/v[2-4].*`)
+var validURL = regexp.MustCompile(`/v[2-4].*`)
 
 type httpRequest struct {
-	URL               string
-	Parameters        map[string][]string
-	Headers           map[string]string
-	BasicAuthUser     string
-	BasicAuthPassword string
-	Client            *http.Client
+	URL                string
+	Parameters         map[string][]string
+	Headers            map[string]string
+	BasicAuthUser      string
+	BasicAuthPassword  string
+	Client             *http.Client
+	capturedCurlOutput string
 }
 
 type httpResponse struct {
@@ -274,6 +276,11 @@ func (r *httpRequest) NewRequest(ctx context.Context, method string, payload pay
 	}
 
 	for header, value := range r.Headers {
+		// Special case, override the Host header
+		if header == "Host" {
+			req.Host = value
+			continue
+		}
 		req.Header.Add(header, value)
 	}
 	return req, nil
@@ -286,7 +293,11 @@ func (r *httpRequest) makeRequest(ctx context.Context, method string, payload pa
 	}
 
 	if Debug {
-		fmt.Println(r.curlString(req, payload))
+		if CaptureCurlOutput {
+			r.capturedCurlOutput = r.curlString(req, payload)
+		} else {
+			fmt.Println(r.curlString(req, payload))
+		}
 	}
 
 	response := httpResponse{}
@@ -341,7 +352,16 @@ func (r *httpRequest) curlString(req *http.Request, p payload) string {
 
 	parts := []string{"curl", "-i", "-X", req.Method, req.URL.String()}
 	for key, value := range req.Header {
-		parts = append(parts, fmt.Sprintf("-H \"%s: %s\"", key, value[0]))
+		if key == "Authorization" {
+			parts = append(parts, fmt.Sprintf("-H \"%s: %s\"", key, "<redacted>"))
+		} else {
+			parts = append(parts, fmt.Sprintf("-H \"%s: %s\"", key, value[0]))
+		}
+	}
+
+	// Special case for Host
+	if req.Host != "" {
+		parts = append(parts, fmt.Sprintf("-H \"Host: %s\"", req.Host))
 	}
 
 	//parts = append(parts, fmt.Sprintf(" --user '%s:%s'", r.BasicAuthUser, r.BasicAuthPassword))
