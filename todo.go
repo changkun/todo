@@ -12,13 +12,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
 	"time"
 
 	"github.com/mailgun/mailgun-go/v4"
+	"github.com/sashabaranov/go-openai"
 	"gopkg.in/yaml.v3"
 )
 
@@ -32,29 +32,34 @@ type config struct {
 }
 
 var (
-	mg   *mailgun.MailgunImpl
-	conf config
+	mg     *mailgun.MailgunImpl
+	conf   config
+	client *openai.Client
 
 	//go:embed conf.yml
 	confRaw []byte
 )
 
 func init() {
-	log.SetPrefix("todo: ")
-	log.SetFlags(0)
-
 	err := yaml.Unmarshal(confRaw, &conf)
 	if err != nil {
-		log.Fatalf("cannot parse config, err: %v\n", err)
+		fatal("todo: cannot parse config, err: %v\n", err)
 	}
 
 	conf.APIKey = os.Getenv(conf.APIKey)
 	if conf.APIKey == "" {
-		log.Fatalf("missing mailgun API key from $MAILGUN_APIKEY")
+		fatal("todo: missing mailgun API key from $MAILGUN_APIKEY")
 	}
 
 	mg = mailgun.NewMailgun(conf.Domain, conf.APIKey)
 	mg.SetAPIBase(conf.APIBase)
+
+	openaiToken := os.Getenv("OPENAI_API_KEY")
+	if openaiToken == "" {
+		return
+	}
+
+	client = openai.NewClient(openaiToken)
 }
 
 func main() {
@@ -75,7 +80,7 @@ $ todo "I've to do something"
 
 	subject := strings.Join(flag.Args(), " ")
 	if subject == "" {
-		log.Fatalf("missing todo subject.")
+		fatal("todo: missing todo subject.")
 	}
 
 	// When creating a TODO, future version may use different prefix to
@@ -83,10 +88,10 @@ $ todo "I've to do something"
 	a, err := newTODO("todo: " + subject)
 	if err != nil {
 		if errors.Is(err, errCanceled) {
-			log.Println("TODO is canceled.")
+			fmt.Fprintf(os.Stderr, "todo: TODO is canceled.")
 			return
 		}
-		log.Fatalf("cannot created a TODO item: %v", err)
+		fatal("todo: cannot created a TODO item: %v", err)
 	}
 
 	text := a.subject
@@ -94,16 +99,54 @@ $ todo "I've to do something"
 		text = strings.Join(a.text, "\n")
 	}
 
+	if client != nil {
+		fmt.Fprintf(os.Stdout, "todo: generating GPT suggestion...\n")
+		stream, err := client.CreateChatCompletionStream(
+			context.Background(),
+			openai.ChatCompletionRequest{
+				Model: openai.GPT4,
+				Messages: []openai.ChatCompletionMessage{
+					{
+						Role:    openai.ChatMessageRoleUser,
+						Content: "You are a personal assistant. He has a TODO item for you:\n" + text + "\n\n Please figure out a way to help him to complete this TODO item.",
+					},
+				},
+				Stream: true,
+			},
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "todo: failed to generate GPT suggestion: %v", err)
+		} else {
+			suggestion := ""
+			defer stream.Close()
+			for {
+				response, err := stream.Recv()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "todo: failed to receive stream: %v", err)
+					break
+				}
+
+				suggestion += response.Choices[0].Delta.Content
+				fmt.Fprintf(os.Stdout, response.Choices[0].Delta.Content)
+			}
+			text += "\n\nSuggestion by GPT4:\n" + suggestion + "\n"
+		}
+	}
+
 	for {
 		err := sendEmail(context.Background(), a.subject, text, conf.Inbox)
 		if err != nil {
-			log.Println("failed to send email, retry in 3 seconds...")
+			fmt.Fprintf(os.Stderr, "todo: failed to send email, retry in 3 seconds...")
 			time.Sleep(3 * time.Second)
 			continue
 		}
 		break
 	}
-	log.Println("SENT!")
+	fmt.Fprintf(os.Stdout, "\n todo: SENT!")
 }
 
 func sendEmail(ctx context.Context, subject, text string, inbox string) error {
@@ -113,7 +156,7 @@ func sendEmail(ctx context.Context, subject, text string, inbox string) error {
 	msg := mg.NewMessage(conf.Email, subject, text, inbox)
 	_, _, err := mg.Send(ctx, msg)
 	if err != nil {
-		log.Printf("failed to send a TODO to %s: %v", conf.Person, err)
+		fmt.Fprintf(os.Stderr, "todo: failed to send a TODO to %s: %v", conf.Person, err)
 		return err
 	}
 	return nil
@@ -136,7 +179,7 @@ func newTODO(subject string) (*todo, error) {
 
 func (a *todo) waitBody() bool {
 	s := bufio.NewScanner(os.Stdin)
-	fmt.Println("(Enter an empty line to complete; Ctrl+C/Ctrl+D to cancel)")
+	fmt.Fprintf(os.Stdout, "todo: (Enter an empty line to complete; Ctrl+C/Ctrl+D to cancel)\n")
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
@@ -144,7 +187,7 @@ func (a *todo) waitBody() bool {
 	line := make(chan string, 1)
 	go func() {
 		for {
-			fmt.Print("> ")
+			fmt.Fprintf(os.Stdout, "> ")
 			if !s.Scan() {
 				sigCh <- os.Interrupt
 				return
@@ -169,4 +212,9 @@ func (a *todo) waitBody() bool {
 			a.text = append(a.text, l)
 		}
 	}
+}
+
+func fatal(msg string, args ...any) {
+	fmt.Fprintf(os.Stderr, msg, args...)
+	os.Exit(1)
 }
