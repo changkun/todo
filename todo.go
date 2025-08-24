@@ -18,7 +18,8 @@ import (
 	"time"
 
 	"github.com/mailgun/mailgun-go/v4"
-	"github.com/sashabaranov/go-openai"
+	"github.com/openai/openai-go/v2"
+	"github.com/openai/openai-go/v2/option"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,7 +35,7 @@ type config struct {
 var (
 	mg     *mailgun.MailgunImpl
 	conf   config
-	client *openai.Client
+	client openai.Client
 
 	//go:embed conf.yml
 	confRaw []byte
@@ -59,7 +60,7 @@ func init() {
 		return
 	}
 
-	client = openai.NewClient(openaiToken)
+	client = openai.NewClient(option.WithAPIKey(openaiToken))
 }
 
 func main() {
@@ -99,42 +100,21 @@ $ todo "I've to do something"
 		text = strings.Join(a.text, "\n")
 	}
 
-	if client != nil {
-		fmt.Fprintf(os.Stdout, "todo: generating GPT suggestion...\n")
-		stream, err := client.CreateChatCompletionStream(
-			context.Background(),
-			openai.ChatCompletionRequest{
-				Model: openai.GPT4,
-				Messages: []openai.ChatCompletionMessage{
-					{
-						Role:    openai.ChatMessageRoleUser,
-						Content: "You are a personal assistant. He has a TODO item for you:\n" + text + "\n\n Please figure out a way to help him to complete this TODO item.",
-					},
-				},
-				Stream: true,
+	fmt.Fprintf(os.Stdout, "todo: generating GPT suggestion...\n")
+	resp, err := client.Chat.Completions.New(
+		context.Background(),
+		openai.ChatCompletionNewParams{
+			Model: openai.ChatModelGPT4_1Nano2025_04_14,
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				openai.SystemMessage("You are a helpful assistant that helps summarize the given text."),
+				openai.UserMessage(text),
 			},
-		)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "todo: failed to generate GPT suggestion: %v", err)
-		} else {
-			suggestion := ""
-			defer stream.Close()
-			for {
-				response, err := stream.Recv()
-				if errors.Is(err, io.EOF) {
-					break
-				}
-
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "todo: failed to receive stream: %v", err)
-					break
-				}
-
-				suggestion += response.Choices[0].Delta.Content
-				fmt.Fprintf(os.Stdout, response.Choices[0].Delta.Content)
-			}
-			text += "\n\nSuggestion by GPT4:\n" + suggestion + "\n"
-		}
+		},
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "todo: failed to generate GPT suggestion: %v", err)
+	} else {
+		text += "\n\nSuggestion by GPT4:\n" + resp.Choices[0].Message.Content + "\n"
 	}
 
 	for {
